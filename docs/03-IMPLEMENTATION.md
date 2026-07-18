@@ -632,20 +632,26 @@ prove it, and it becomes the fundraising and moat story.
 
 ## The guardrail decision — balanced posture (implemented)
 
-The **`evaluateWriteAction()`** policy in
-[`packages/policy/src/guardrails.ts`](../packages/policy/src/guardrails.ts) is implemented
-with Servvo's **balanced** posture and defaults (`BALANCED_DEFAULT_CONFIG`):
+The async, effect-aware **`evaluateWriteAction(req, deps)`** in
+[`packages/policy/src/guardrails.ts`](../packages/policy/src/guardrails.ts) implements
+Servvo's **balanced** posture (`BALANCED_DEFAULT_CONFIG`), verified by
+[`guardrails.test.ts`](../packages/policy/src/guardrails.test.ts):
 
 - **Read-only by default**; only `set_item_availability`, `update_item_price`,
   `create_shift`, `update_shift` are enabled out of the box. **Financial reversals
   (`void_check`/`refund_payment`) are off** until a brand explicitly enables them.
-- **LOW** actions (86 an item) flow freely — the audit log is the safety net.
-- **MEDIUM** price changes auto-approve under a **$5.00** threshold and otherwise return
-  `NEEDS_CONFIRMATION`; shift changes (reversible, no dollar amount) pass.
-- **HIGH** financial actions **never auto-execute** — always `NEEDS_CONFIRMATION` under the
-  **$50.00** cap, `DENIED` above it.
-- Plus a per-location allow-list and a **30 writes/min** velocity cap.
+- **LOW** (86 an item) flows — the audit log is the safety net.
+- **MEDIUM** price changes auto-approve only within a **±15% band or ≤$0.50** of the
+  *resolved current price* (never the raw new price); shift edits pass unless inside the
+  **2h start lockout**.
+- **HIGH** financial actions use the **server-resolved true amount**: `DENIED` above the
+  **$50** per-tool cap, and **always `NEEDS_CONFIRMATION`** otherwise — they never
+  auto-execute.
+- Cross-cutting: per-tool **minimum role**, live-brand-location check, **atomic** 30/min
+  velocity cap, malformed-config rejection, and a **non-bypassable confirmation token**.
 
-Each branch documents the trade-off (safer vs. looser) inline, so shifting posture is a
-matter of editing `BALANCED_DEFAULT_CONFIG` and the branch behavior. Next step is the
-table-driven test suite (Prompt 11), which will encode these same cases in the repo.
+**Gate order** (each fails closed): config → known tool → enabled → args → role → location →
+tier rules → confirmation → atomic velocity → `ALLOWED`.
+
+Wiring `deps` (`PolicyDependencies`) is the integration work in Prompt 11 — the engine only
+enforces what those trusted lookups tell it, and refuses to proceed when they can't answer.

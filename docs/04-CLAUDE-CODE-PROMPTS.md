@@ -244,24 +244,37 @@ tools now return real data for a brand whose labor system is 7shifts even if its
 ## Prompt 11 — Guardrail policy engine + write tools
 
 ```
-packages/policy/src/guardrails.ts already contains the types (WriteTool, Sensitivity tiers,
-BrandGuardrailConfig, WriteActionRequest, Decision) and a documented TODO in
-evaluateWriteAction(). Do NOT overwrite my policy decision if I've implemented it; if it still
-throws "not implemented", implement a SAFE DEFAULT policy exactly as described in the file's
-TODO comment (enabled-tool check → location allow-list → velocity cap → sensitivity+threshold
-tiers with read-only-by-default and financial actions denied unless explicitly enabled),
-preferring DENIED/NEEDS_CONFIRMATION over ALLOWED when ambiguous.
+packages/policy/src/guardrails.ts already contains the FINISHED balanced policy — an async,
+fail-closed evaluateWriteAction(req, deps) with the PolicyDependencies interface, reason-code
+Decisions, config validation, RBAC, per-tool financial caps, percentage price bands, an atomic
+velocity reserve, and a confirmation-token protocol — plus guardrails.test.ts (20 passing
+cases). Do NOT rewrite the policy logic or the tests. Your job is to WIRE IT to real infra.
 
-Then add a table-driven Vitest suite covering: disabled tool denied, disallowed location
-denied, velocity cap denied, LOW allowed, MEDIUM over threshold needs confirmation, HIGH over
-threshold denied, and the global require-confirmation flag. Wire the engine into the MCP
-server: implement the write tools set_item_availability, update_item_price, create_shift,
-update_shift (and void_check/refund_payment as DISABLED-by-default) so each calls
-evaluateWriteAction() BEFORE any vendor call, audits the decision, returns a clear message on
-DENIED/NEEDS_CONFIRMATION, and only executes via the adapter on ALLOWED. Add idempotency keys
-to write calls so a retried agent call can't double-apply. Add a dashboard page to edit the
-BrandGuardrailConfig (enabled tools, allowed locations, thresholds, confirmation flag,
-velocity cap).
+Implement a concrete PolicyDependencies (packages/policy/src/deps.ts or in the mcp-server):
+- getCurrentItemPriceCents → read via the location's connector (getMenu) with a short cache.
+- resolveFinancialAmountCents → look up the true check/payment total via the connector; return
+  null if it can't be resolved (the engine will DENY, which is correct).
+- isLiveBrandLocation → check the Location table (live === true, belongs to brandId).
+- reserveVelocitySlot → ATOMIC Redis INCR on key {brandId}:{tool}:{minute} with a 60s TTL;
+  return false when the count would exceed limitPerMinute. Must be atomic (no check-then-act).
+- getAgentRole → map the agent's token subject to a Role for the brand.
+- consumeConfirmationToken → validate & single-use-consume a token from a short-TTL store,
+  bound to computeActionFingerprint(); return false if missing/expired/mismatched.
+- getShiftStartMs → resolve the shift start from the scheduling connector.
+
+Then wire the MCP write tools (set_item_availability, update_item_price, create_shift,
+update_shift; void_check/refund_payment present but DISABLED by default): each loads the
+brand's BrandGuardrailConfig, calls evaluateWriteAction() BEFORE any vendor call, AUDITS the
+decision.outcome + decision.code, and branches — DENIED → error; NEEDS_CONFIRMATION → return
+the actionFingerprint to the human-approval flow; ALLOWED → execute via the connector using the
+EXACT figures the policy judged, with an idempotency key so a retried call can't double-apply.
+
+Build the human-approval path: an endpoint that, given a fingerprint + operator auth, mints a
+one-time expiring confirmation token (bound to that fingerprint) which the agent then replays.
+The token must be un-forgeable by the agent. Add a dashboard page to edit BrandGuardrailConfig
+(enabled tools, allowed locations, price band, financial caps, min roles, lockout, velocity)
+and to review/approve pending confirmations. Extend the test suite only to cover the new deps
+and the approval endpoint; keep the existing guardrails.test.ts green.
 ```
 
 ---
