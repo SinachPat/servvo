@@ -395,14 +395,26 @@ export function buildServer(brandId: string) {
       available: z.boolean()
     },
     async (args, { authInfo }) => {
-      const decision = await evaluateWriteAction({
-        brandId, agentSub: authInfo.sub, tool: "set_item_availability", args
-      });
-      await audit({ brandId, agentSub: authInfo.sub, tool: "set_item_availability", args, outcome: decision.allowed ? "ALLOWED" : "DENIED", reason: decision.reason });
-      if (!decision.allowed) {
-        return { content: [{ type: "text", text: `Blocked by policy: ${decision.reason}` }], isError: true };
-      }
-      // ... perform via connector ...
+      // `policyDeps` wires the engine to trusted infra (current price, resolved
+      // financial amounts, live-location check, atomic velocity, agent role,
+      // confirmation-token consumption). The agent's args are never trusted for amounts.
+      const decision = await evaluateWriteAction(
+        { brandId, agentSub: authInfo.sub, tool: "set_item_availability", args,
+          config: await loadGuardrailConfig(brandId), confirmationToken: args.confirmationToken },
+        policyDeps
+      );
+      await audit({ brandId, agentSub: authInfo.sub, tool: "set_item_availability", args,
+        outcome: decision.outcome, reason: "reason" in decision ? decision.reason : undefined,
+        code: decision.code });
+
+      if (decision.outcome === "DENIED")
+        return { content: [{ type: "text", text: `Blocked by policy (${decision.code}): ${decision.reason}` }], isError: true };
+      if (decision.outcome === "NEEDS_CONFIRMATION")
+        // Hand the fingerprint to the human-approval flow; a valid one-time token
+        // returns here on the agent's retry and satisfies the gate.
+        return { content: [{ type: "text", text: `Needs confirmation (${decision.code}): ${decision.reason}` }], isError: true };
+
+      // ALLOWED — perform via connector with the exact figures the policy judged ...
       return { content: [{ type: "text", text: "Item availability updated." }] };
     }
   );
@@ -415,8 +427,10 @@ Key points:
 - **Per-brand server instance** keyed off the authenticated token's brand claim.
 - **Tools are self-describing** — verbose, example-rich descriptions and typed args so
   the LLM calls them correctly. The tool surface *is* the UX.
-- **Guardrails run server-side** on every write, before any vendor call. Never trust the agent.
-- **Every call is audited**, allowed or denied.
+- **Guardrails run server-side** on every write, before any vendor call. The engine is
+  **async and effect-aware** — it resolves the *real* price/amount via injected deps, so the
+  agent can't understate a write. Never trust the agent.
+- **Every call is audited** with its machine-readable `code`, allowed or denied.
 - **Resources** (e.g., `brand://profile`, `menu://{location}`) expose readable context that
   agents can attach without a tool call.
 
@@ -438,26 +452,33 @@ Key points:
 
 ## 9. The guardrail policy engine
 
-**This is the security heart of the write path, and a genuine design fork** — there are
-several valid policies and the right one is a product/risk decision, not a lookup. The
-engine takes a proposed write action and returns an allow/deny (or "needs confirmation")
-decision, enforced server-side before any vendor call.
+**This is the security heart of the write path.** The engine takes a proposed write and
+returns `ALLOWED` / `DENIED` / `NEEDS_CONFIRMATION` (each with a machine-readable
+`DecisionCode`), enforced server-side before any vendor call. It ships the **balanced
+posture** in [`packages/policy/src/guardrails.ts`](../packages/policy/src/guardrails.ts)
+(`BALANCED_DEFAULT_CONFIG` + `evaluateWriteAction()`) and is covered by
+[`guardrails.test.ts`](../packages/policy/src/guardrails.test.ts) — 20 cases including a
+regression for every hole found in review.
 
-The interface and implementation live in
-[`packages/policy/src/guardrails.ts`](../packages/policy/src/guardrails.ts). It ships the
-**balanced posture** (`BALANCED_DEFAULT_CONFIG` + `evaluateWriteAction()`), with the
-trade-off at each branch documented inline so you can dial it toward safer or looser. The
-logic is verified across all branches (enablement, location scope, velocity, and the
-LOW/MEDIUM/HIGH sensitivity tiers).
+**The engine is async and effect-aware.** It does *not* trust the agent's args for anything
+that matters; it resolves the truth through injected `PolicyDependencies` and **fails
+closed** when it can't:
 
-Design considerations the policy must weigh:
-- **Read-only by default**; writes opt-in per tool per brand.
-- **Action sensitivity tiers** — `set_item_availability` (low) vs. `update_item_price`
-  (medium) vs. `void_check`/`refund_payment` (high, disabled unless explicitly enabled).
-- **Thresholds** — dollar limits on price changes/refunds; per-location allow-lists.
-- **Confirmation** — some actions return "needs human confirmation" rather than executing.
-- **Rate/velocity** — cap writes per minute to contain a misbehaving agent.
-- **Role** — which dashboard-configured role the connecting agent maps to.
+| Concern | How it's enforced (not trusted from args) |
+|---------|-------------------------------------------|
+| Price change magnitude | `getCurrentItemPriceCents()` → judged as a **% band + absolute floor**, not the raw new price. Unverifiable → `NEEDS_CONFIRMATION`. |
+| Financial amount (void/refund) | `resolveFinancialAmountCents()` returns the **true** amount server-side; unresolved → `DENIED`. Above the per-tool cap → `DENIED`; otherwise **always** `NEEDS_CONFIRMATION`. |
+| Location | `isLiveBrandLocation()` — an empty allow-list still requires a real live location of *this* brand (never "any string"). |
+| Role | `getAgentRole()` vs. `minimumRoleByTool` — enforces the RBAC the product promises. |
+| Velocity | `reserveVelocitySlot()` — an **atomic** reserve (Redis), not a passed-in count, so there's no check-then-act race. |
+| Confirmation | A server-minted, one-time, expiring token bound to the action's `computeActionFingerprint()`. The agent **cannot** forge a boolean to self-approve; hard denials are never bypassable by a token. |
+| Config | `validateConfig()` rejects `NaN`/negative/zero values up front, so a bad config can't silently disable a gate. |
+
+Design decisions the posture encodes:
+- **Read-only by default**; writes opt-in per tool per brand; financial reversals ship off.
+- **Sensitivity tiers** — LOW (86 an item) flows; MEDIUM (price/shift) gated by band/lockout;
+  HIGH (void/refund) never auto-executes.
+- **Missing/malformed input is a denial, not a default** — no `?? 0`.
 
 ---
 

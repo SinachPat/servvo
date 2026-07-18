@@ -49,17 +49,9 @@ without anyone writing an integration.
 
 ---
 
-## The 90-day pilot bar (from the idea)
+## The 90-day pilot bar
 
 - **5 pilot brands**, sourced through franchise consultant networks
 - **95% connector uptime**
 - **Setup under 30 minutes per brand**
 - Falling short → templates go back for another pass before a second vertical opens
-
----
-
-## Source
-
-Built from the Ideabrowser idea *"Done-for-you MCP servers for multi-location
-businesses"* (brand: **Servvo**) and its brand-package template, anchored to the
-restaurant vertical, a managed multi-tenant architecture, and a TypeScript stack.

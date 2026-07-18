@@ -1,36 +1,43 @@
 /**
  * Servvo — Guardrail Policy Engine
  * ---------------------------------
- * This module decides whether an AI agent's proposed WRITE action against a brand's
- * live restaurant systems (Toast/Square/Clover/7shifts) is ALLOWED, DENIED, or
- * NEEDS_CONFIRMATION. It runs SERVER-SIDE on every write, before any vendor call.
- * The agent is never trusted; this is the last line of defense in front of real
- * money and payroll.
+ * Decides whether an AI agent's proposed WRITE against a brand's live restaurant systems
+ * (Toast/Square/Clover/7shifts) is ALLOWED, DENIED, or NEEDS_CONFIRMATION. Runs SERVER-SIDE
+ * on every write, before any vendor call. The agent is never trusted; this is the last line
+ * of defense in front of real money and payroll.
  *
- * POSTURE IMPLEMENTED HERE: **Balanced** (Servvo's default).
- * There are several valid risk postures; this file implements the balanced one and
- * documents the trade-off at each branch so you can dial it toward either extreme:
- *   - Maximally safe: read-only always; every write needs confirmation. Great trust,
- *     more friction, agents feel "blocked."
- *   - Balanced (THIS FILE): low-sensitivity writes (86 an item) flow freely; medium
- *     writes (price changes) pass under a dollar threshold and otherwise need
- *     confirmation; high writes (refunds/voids) never auto-execute and are off unless
- *     a brand explicitly enables them.
- *   - Permissive: trust the brand's config and let most writes through, relying on the
- *     audit log after the fact.
- * To shift posture, change BALANCED_DEFAULT_CONFIG and/or the branch behavior below —
- * every branch calls out what "safer" vs. "looser" would do.
+ * DESIGN PRINCIPLES (learned the hard way from the v1 review):
+ *   1. FAIL CLOSED. Missing/malformed args, unverifiable amounts, bad config, or unknown
+ *      roles resolve to DENIED / NEEDS_CONFIRMATION — never to a silent ALLOW. There are no
+ *      `?? 0` fallbacks: an amount we can't verify is not an amount we approve.
+ *   2. JUDGE THE REAL EFFECT, NOT THE AGENT'S ARGS. The engine resolves the *actual* current
+ *      price and the *actual* void/refund amount via injected, trusted lookups — the agent
+ *      cannot understate a $5,000 void as "$0". The caller MUST execute exactly the figures
+ *      the policy judged.
+ *   3. NON-BYPASSABLE CONFIRMATION. NEEDS_CONFIRMATION returns an actionFingerprint. Only the
+ *      server-side human-approval path can mint a one-time, expiring token bound to that
+ *      fingerprint; the agent cannot forge a boolean to self-approve. Hard denials (over cap,
+ *      disabled tool, wrong role, bad location, rate limit) are NOT bypassable by a token.
+ *   4. ATOMIC VELOCITY. The rate limit is an atomic reserve-a-slot on the caller's store
+ *      (Redis), not a number the engine trusts — no check-then-act race.
+ *
+ * POSTURE: **Balanced** (see BALANCED_DEFAULT_CONFIG). Low-sensitivity writes (86 an item)
+ * flow; price changes auto-approve only within a percentage/absolute band; financial reversals
+ * never auto-execute and are off unless a brand enables them. Every branch notes what a safer
+ * or looser posture would change.
  */
 
-// ---- Action sensitivity tiers ---------------------------------------------------
+import { createHash } from "node:crypto";
+
+// ---- Tools & sensitivity --------------------------------------------------------
 
 export type WriteTool =
-  | "set_item_availability" // 86 / un-86 an item        (LOW sensitivity)
-  | "update_item_price"     // change a menu price        (MEDIUM sensitivity)
-  | "create_shift"          // scheduling                 (MEDIUM sensitivity)
-  | "update_shift"          // scheduling                 (MEDIUM sensitivity)
-  | "void_check"            // reverse a check            (HIGH sensitivity)
-  | "refund_payment";       // refund money               (HIGH sensitivity)
+  | "set_item_availability" // 86 / un-86 an item     (LOW)
+  | "update_item_price"     // change a menu price     (MEDIUM)
+  | "create_shift"          // scheduling              (MEDIUM)
+  | "update_shift"          // scheduling              (MEDIUM)
+  | "void_check"            // reverse a check         (HIGH)
+  | "refund_payment";       // refund money            (HIGH)
 
 export type Sensitivity = "LOW" | "MEDIUM" | "HIGH";
 
@@ -43,153 +50,296 @@ export const SENSITIVITY: Record<WriteTool, Sensitivity> = {
   refund_payment: "HIGH",
 };
 
-// ---- The per-brand guardrail configuration (set in the dashboard) ---------------
+// ---- Roles ----------------------------------------------------------------------
+
+/** Ordered least→most privileged. An agent's role must rank >= the tool's minimum. */
+export const ROLE_RANK = { read_only: 0, staff: 1, manager: 2, owner: 3 } as const;
+export type Role = keyof typeof ROLE_RANK;
+
+// ---- Config (per brand, edited in the dashboard) --------------------------------
 
 export interface BrandGuardrailConfig {
-  /** Tools the operator has explicitly enabled for agents. Anything not listed is denied. */
+  /** Tools the operator explicitly enabled. Anything not listed is denied. */
   enabledTools: WriteTool[];
-  /** Location ids where writes are permitted at all. Empty = all live locations. */
+  /** Live locations where writes are permitted. Empty = all of the brand's live locations. */
   allowedLocationIds: string[];
-  /** Max dollar delta (in cents) an agent may change a price by without confirmation. */
-  priceChangeThresholdCents: number;
-  /** Max dollar amount (in cents) an agent may refund/void without confirmation. */
-  financialActionThresholdCents: number;
-  /** If true, MEDIUM+ actions return NEEDS_CONFIRMATION instead of executing. */
+  /** Auto-approve a price change if it is within this fraction of the current price (0.15 = 15%). */
+  priceChangePctThreshold: number;
+  /** …or within this absolute amount (cents), whichever is more permissive (covers cheap items). */
+  priceChangeAbsFloorCents: number;
+  /** Hard cap (cents) per financial tool; above this the action is DENIED outright. */
+  financialCapCentsByTool: Record<"void_check" | "refund_payment", number>;
+  /** If true, all MEDIUM/HIGH writes require confirmation (LOW is unaffected). */
   requireConfirmationForMediumAndHigh: boolean;
-  /** Max write actions per minute across all agents for this brand (velocity cap). */
+  /** Atomic per-brand-per-tool write ceiling per minute. */
   maxWritesPerMinute: number;
+  /** Minimum role required per tool. Missing entry defaults to "manager" (fail-safe). */
+  minimumRoleByTool: Partial<Record<WriteTool, Role>>;
+  /** Block shift create/edit within this many minutes of the shift's start. 0 disables. */
+  shiftEditLockoutMinutes: number;
 }
-
-// ---- The request the engine evaluates -------------------------------------------
-
-export interface WriteActionRequest {
-  brandId: string;
-  agentSub: string;               // subject claim from the agent's OAuth token
-  tool: WriteTool;
-  args: Record<string, unknown>;  // e.g. { locationId, itemId, priceCents } or { checkId, amountCents }
-  config: BrandGuardrailConfig;
-  /** Writes by this brand in the last 60s, for the velocity cap. */
-  recentWriteCount: number;
-}
-
-export type Decision =
-  | { outcome: "ALLOWED" }
-  | { outcome: "DENIED"; reason: string }
-  | { outcome: "NEEDS_CONFIRMATION"; reason: string };
 
 /**
- * A sensible starting guardrail config embodying the balanced posture. The dashboard
- * lets each brand override these. Financial reversals are deliberately absent from
- * `enabledTools` — a brand must add them on purpose.
+ * Balanced defaults. Financial reversals are deliberately ABSENT from enabledTools — a brand
+ * must add them on purpose. To go safer: raise minimum roles, lower thresholds/caps, set
+ * requireConfirmationForMediumAndHigh, or narrow allowedLocationIds. To go looser: the reverse.
  */
 export const BALANCED_DEFAULT_CONFIG: BrandGuardrailConfig = {
   enabledTools: ["set_item_availability", "update_item_price", "create_shift", "update_shift"],
-  allowedLocationIds: [],              // empty === all live locations
-  priceChangeThresholdCents: 500,      // auto-approve price moves up to $5.00
-  financialActionThresholdCents: 5000, // never auto-refund/void above $50.00
+  allowedLocationIds: [],
+  priceChangePctThreshold: 0.15, // ±15% auto-approves…
+  priceChangeAbsFloorCents: 50, // …or any change ≤ $0.50 (so $2 coffees aren't over-gated)
+  financialCapCentsByTool: { void_check: 5000, refund_payment: 5000 }, // $50 hard ceiling
   requireConfirmationForMediumAndHigh: false,
   maxWritesPerMinute: 30,
+  minimumRoleByTool: {
+    set_item_availability: "staff",
+    update_item_price: "manager",
+    create_shift: "manager",
+    update_shift: "manager",
+    void_check: "manager",
+    refund_payment: "manager",
+  },
+  shiftEditLockoutMinutes: 120, // no shift edits within 2h of start
 };
+
+// ---- Request / decision ---------------------------------------------------------
+
+export interface WriteActionRequest {
+  brandId: string;
+  agentSub: string; // subject claim from the agent's OAuth token
+  tool: WriteTool;
+  args: Record<string, unknown>;
+  config: BrandGuardrailConfig;
+  /** One-time token minted by the human-approval path to satisfy a prior NEEDS_CONFIRMATION. */
+  confirmationToken?: string;
+}
+
+export type DecisionCode =
+  | "ALLOWED"
+  | "INVALID_CONFIG"
+  | "UNKNOWN_TOOL"
+  | "TOOL_DISABLED"
+  | "INVALID_ARGUMENTS"
+  | "INSUFFICIENT_ROLE"
+  | "LOCATION_UNKNOWN"
+  | "LOCATION_NOT_ALLOWED"
+  | "PRICE_UNVERIFIABLE"
+  | "OVER_PRICE_THRESHOLD"
+  | "FINANCIAL_AMOUNT_UNRESOLVED"
+  | "OVER_FINANCIAL_CAP"
+  | "FINANCIAL_ACTION_CONFIRM"
+  | "SCHEDULING_LOCKOUT"
+  | "CONFIRMATION_REQUIRED"
+  | "CONFIRMATION_INVALID"
+  | "CONFIRMATION_UNAVAILABLE"
+  | "RATE_LIMITED";
+
+export type Decision =
+  | { outcome: "ALLOWED"; code: "ALLOWED" }
+  | { outcome: "DENIED"; code: DecisionCode; reason: string }
+  | { outcome: "NEEDS_CONFIRMATION"; code: DecisionCode; reason: string; actionFingerprint: string };
+
+// ---- Injected, trusted dependencies (the caller wires these to real infra) ------
+
+export interface PolicyDependencies {
+  /** Current price (cents) of the item at the location, or null if it can't be resolved. */
+  getCurrentItemPriceCents(i: { brandId: string; locationId: string; itemId: string }): Promise<number | null>;
+  /** The TRUE amount (cents) a void/refund would move, resolved server-side. null if unresolved. */
+  resolveFinancialAmountCents(i: { brandId: string; tool: "void_check" | "refund_payment"; args: Record<string, unknown> }): Promise<number | null>;
+  /** Is this a LIVE location that belongs to this brand? */
+  isLiveBrandLocation(i: { brandId: string; locationId: string }): Promise<boolean>;
+  /** Atomically reserve one write slot in the current minute; false if the ceiling is reached. */
+  reserveVelocitySlot(i: { brandId: string; tool: WriteTool; limitPerMinute: number }): Promise<boolean>;
+  /** Role the connecting agent maps to for this brand, or null if none. */
+  getAgentRole(i: { brandId: string; agentSub: string }): Promise<Role | null>;
+  /** Validate & CONSUME a one-time confirmation token bound to this action's fingerprint. */
+  consumeConfirmationToken?(i: { brandId: string; agentSub: string; tool: WriteTool; token: string; actionFingerprint: string }): Promise<boolean>;
+  /** Start time (epoch ms) of the shift being created/edited, or null if unknown. */
+  getShiftStartMs?(i: { brandId: string; args: Record<string, unknown> }): Promise<number | null>;
+  /** Injectable clock (testability). */
+  now?(): number;
+}
 
 // ---- helpers --------------------------------------------------------------------
 
-/** args is validated upstream by each tool's zod schema, so a present field is well-typed. */
-function num(args: Record<string, unknown>, key: string): number | undefined {
-  const v = args[key];
-  return typeof v === "number" ? v : undefined;
+const str = (a: Record<string, unknown>, k: string): string | undefined =>
+  typeof a[k] === "string" && (a[k] as string).length > 0 ? (a[k] as string) : undefined;
+const isPosInt = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n > 0;
+const isNonNegInt = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
+const isFrac = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0;
+const usd = (cents: number): string => `${cents < 0 ? "-" : ""}$${(Math.abs(cents) / 100).toFixed(2)}`;
+
+const allow = (): Decision => ({ outcome: "ALLOWED", code: "ALLOWED" });
+const deny = (code: DecisionCode, reason: string): Decision => ({ outcome: "DENIED", code, reason });
+const confirm = (code: DecisionCode, reason: string, actionFingerprint: string): Decision => ({
+  outcome: "NEEDS_CONFIRMATION",
+  code,
+  reason,
+  actionFingerprint,
+});
+
+/**
+ * Stable fingerprint of the exact action, so a human-minted confirmation token binds to THIS
+ * request and can't be replayed against a different amount/item/location. The human-approval
+ * service must compute the token target with this same function.
+ */
+export function computeActionFingerprint(req: Pick<WriteActionRequest, "brandId" | "tool" | "args">): string {
+  const canonical = JSON.stringify({ brandId: req.brandId, tool: req.tool, args: sortDeep(req.args) });
+  return createHash("sha256").update(canonical).digest("hex");
 }
-function str(args: Record<string, unknown>, key: string): string | undefined {
-  const v = args[key];
-  return typeof v === "string" ? v : undefined;
+function sortDeep(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(sortDeep);
+  if (v && typeof v === "object")
+    return Object.fromEntries(Object.keys(v as object).sort().map((k) => [k, sortDeep((v as Record<string, unknown>)[k])]));
+  return v;
 }
-/** cents → "$12.34" for human-readable deny/confirm reasons. */
-function usd(cents: number): string {
-  return `$${(Math.abs(cents) / 100).toFixed(2)}`;
+
+/** Reject nonsensical config up front — a NaN/negative threshold must not silently disable a gate. */
+function validateConfig(c: BrandGuardrailConfig): string | null {
+  if (!Array.isArray(c.enabledTools)) return "enabledTools must be an array.";
+  if (!Array.isArray(c.allowedLocationIds)) return "allowedLocationIds must be an array.";
+  if (!isFrac(c.priceChangePctThreshold)) return "priceChangePctThreshold must be a finite number ≥ 0.";
+  if (!isNonNegInt(c.priceChangeAbsFloorCents)) return "priceChangeAbsFloorCents must be an integer ≥ 0.";
+  if (!isNonNegInt(c.financialCapCentsByTool?.void_check) || !isNonNegInt(c.financialCapCentsByTool?.refund_payment))
+    return "financialCapCentsByTool values must be integers ≥ 0.";
+  if (!isPosInt(c.maxWritesPerMinute)) return "maxWritesPerMinute must be a positive integer.";
+  if (!isNonNegInt(c.shiftEditLockoutMinutes)) return "shiftEditLockoutMinutes must be an integer ≥ 0.";
+  for (const [tool, role] of Object.entries(c.minimumRoleByTool ?? {}))
+    if (role && !(role in ROLE_RANK)) return `minimumRoleByTool.${tool} is not a valid role.`;
+  return null;
+}
+
+/** Resolve the confirmation gate: PROCEED if satisfied, else a Decision to return. */
+async function resolveConfirmation(
+  req: WriteActionRequest,
+  deps: PolicyDependencies,
+  code: DecisionCode,
+  reason: string,
+): Promise<Decision | "PROCEED"> {
+  const fp = computeActionFingerprint(req);
+  if (req.confirmationToken) {
+    if (!deps.consumeConfirmationToken) return deny("CONFIRMATION_UNAVAILABLE", "Confirmation is not supported by this deployment.");
+    const ok = await deps.consumeConfirmationToken({
+      brandId: req.brandId,
+      agentSub: req.agentSub,
+      tool: req.tool,
+      token: req.confirmationToken,
+      actionFingerprint: fp,
+    });
+    // A supplied-but-invalid token is treated as a hard failure (possible tampering/replay).
+    return ok ? "PROCEED" : deny("CONFIRMATION_INVALID", "Confirmation token is invalid, expired, or does not match this action.");
+  }
+  return confirm(code, reason, fp);
 }
 
 // ---------------------------------------------------------------------------------
-// evaluateWriteAction — the balanced policy.
-// Evaluated most-restrictive-gate-first; returns the strictest applicable Decision.
-// Every ALLOWED here can move real money, so ambiguity resolves toward
-// DENIED / NEEDS_CONFIRMATION.
+// evaluateWriteAction — the balanced policy, fail-closed and effect-aware.
+// Gate order: config → known tool → enabled → args → role → location → tier rules
+// (hard denials) → confirmation → atomic velocity → ALLOWED.
 // ---------------------------------------------------------------------------------
-export function evaluateWriteAction(req: WriteActionRequest): Decision {
-  const { tool, args, config, recentWriteCount } = req;
+export async function evaluateWriteAction(req: WriteActionRequest, deps: PolicyDependencies): Promise<Decision> {
+  const now = deps.now ?? Date.now;
 
-  // 1. Enablement. Anything the operator hasn't explicitly turned on is denied.
-  //    Because void_check/refund_payment ship OFF, they fail here on a fresh brand —
-  //    an agent literally cannot move money until someone opts in.
-  //    Trade-off: safest possible default; the cost is operators must enable each tool.
-  //    Looser posture would default more tools on; we don't.
-  if (!config.enabledTools.includes(tool)) {
-    return { outcome: "DENIED", reason: `Tool "${tool}" is not enabled for this brand.` };
-  }
+  // 0. Config sanity — fail closed on malformed config so a bad value can't disable a gate.
+  const cfgErr = validateConfig(req.config);
+  if (cfgErr) return deny("INVALID_CONFIG", cfgErr);
 
-  // 2. Location scope. If the brand restricts writes to specific stores, enforce it.
-  //    Empty list === all live locations allowed.
-  //    Trade-off: an allow-list caps the blast radius of a misbehaving agent to stores
-  //    the operator chose; leaving it empty is friendlier but wider. Balanced ships empty
-  //    (friendly) and lets cautious brands narrow it.
-  const locationId = str(args, "locationId");
-  if (
-    config.allowedLocationIds.length > 0 &&
-    (!locationId || !config.allowedLocationIds.includes(locationId))
-  ) {
-    return { outcome: "DENIED", reason: `Writes are not permitted at location "${locationId ?? "unknown"}".` };
-  }
+  // 1. Known tool.
+  const sensitivity = SENSITIVITY[req.tool];
+  if (!sensitivity) return deny("UNKNOWN_TOOL", `Unknown tool "${req.tool}".`);
 
-  // 3. Velocity cap. Contain a runaway agent regardless of sensitivity.
-  //    Trade-off: a hard ceiling can also block a legitimate bulk op (e.g. 86'ing an item
-  //    across 40 stores in a loop). Set maxWritesPerMinute with real bulk flows in mind;
-  //    raise it for large estates, lower it for tighter control.
-  if (recentWriteCount >= config.maxWritesPerMinute) {
-    return { outcome: "DENIED", reason: `Write rate limit reached (${config.maxWritesPerMinute}/min). Try again shortly.` };
-  }
+  // 2. Enablement. Not explicitly enabled → denied (financial tools ship off).
+  if (!req.config.enabledTools.includes(req.tool))
+    return deny("TOOL_DISABLED", `Tool "${req.tool}" is not enabled for this brand.`);
 
-  const sensitivity = SENSITIVITY[tool];
+  // 3. Common args. A write with no valid locationId can't be scoped → fail closed.
+  const locationId = str(req.args, "locationId");
+  if (!locationId) return deny("INVALID_ARGUMENTS", "Missing or invalid locationId.");
 
-  // 4. LOW (e.g. 86 an item): reversible, non-financial → let it flow.
-  //    Trade-off: frictionless for the common case; the audit log is the safety net
-  //    rather than a prompt. Max-safe posture would route even this through confirmation.
-  if (sensitivity === "LOW") {
-    return { outcome: "ALLOWED" };
-  }
+  // 4. Role. No/insufficient role → denied. (Enforces the RBAC the product promises.)
+  const role = await deps.getAgentRole({ brandId: req.brandId, agentSub: req.agentSub });
+  const minRole = req.config.minimumRoleByTool[req.tool] ?? "manager";
+  if (!role || ROLE_RANK[role] < ROLE_RANK[minRole])
+    return deny("INSUFFICIENT_ROLE", `"${req.tool}" requires the ${minRole} role; agent has ${role ?? "no"} role.`);
 
-  // 5. MEDIUM (price / shift changes).
-  if (sensitivity === "MEDIUM") {
-    // A brand can force a human check on all medium/high writes.
-    if (config.requireConfirmationForMediumAndHigh) {
-      return { outcome: "NEEDS_CONFIRMATION", reason: "Brand policy requires confirmation for this change." };
-    }
-    // Price changes are gated by magnitude; scheduling changes carry no dollar amount and
-    // are easily reversible, so they pass. `deltaCents` (change vs. current price) is
-    // preferred; fall back to the absolute new `priceCents` if a delta wasn't supplied.
-    // Trade-off: the threshold is the line between "routine tweak" (auto) and "needs a
-    // human" (confirm). Lower it to catch more changes; raise it for less friction.
-    if (tool === "update_item_price") {
-      const magnitude = num(args, "deltaCents") ?? num(args, "priceCents") ?? 0;
-      if (Math.abs(magnitude) > config.priceChangeThresholdCents) {
-        return {
-          outcome: "NEEDS_CONFIRMATION",
-          reason: `Price change of ${usd(magnitude)} exceeds the ${usd(config.priceChangeThresholdCents)} auto-approve limit.`,
-        };
+  // 5. Location must be a LIVE location of THIS brand, then (if set) within the allow-list.
+  //    Empty allow-list still requires a real live location — it never means "any string".
+  if (!(await deps.isLiveBrandLocation({ brandId: req.brandId, locationId })))
+    return deny("LOCATION_UNKNOWN", `Location "${locationId}" is not a live location for this brand.`);
+  if (req.config.allowedLocationIds.length > 0 && !req.config.allowedLocationIds.includes(locationId))
+    return deny("LOCATION_NOT_ALLOWED", `Writes are not permitted at location "${locationId}".`);
+
+  // 6. Tier-specific rules. Sets hard denials directly, or flags that confirmation is required.
+  let requiresConfirmation = req.config.requireConfirmationForMediumAndHigh && sensitivity !== "LOW";
+  let confCode: DecisionCode = "CONFIRMATION_REQUIRED";
+  let confReason = "Brand policy requires confirmation for this change.";
+
+  if (req.tool === "set_item_availability") {
+    // LOW: reversible, non-financial. Only requires an item + a boolean.
+    if (!str(req.args, "itemId")) return deny("INVALID_ARGUMENTS", "Missing or invalid itemId.");
+    if (typeof req.args["available"] !== "boolean") return deny("INVALID_ARGUMENTS", "Missing or invalid 'available' boolean.");
+    // No confirmation for LOW even under the global flag; the audit log is the safety net.
+    requiresConfirmation = false;
+  } else if (req.tool === "update_item_price") {
+    const itemId = str(req.args, "itemId");
+    if (!itemId) return deny("INVALID_ARGUMENTS", "Missing or invalid itemId.");
+    const newPrice = req.args["newPriceCents"];
+    if (!isPosInt(newPrice)) return deny("INVALID_ARGUMENTS", "Missing or invalid newPriceCents (must be a positive integer).");
+    // Judge the REAL change: resolve the current price rather than trusting the agent.
+    const current = await deps.getCurrentItemPriceCents({ brandId: req.brandId, locationId, itemId });
+    if (current === null) {
+      // Can't verify the delta → don't guess; require a human. (Safer posture: DENY here.)
+      requiresConfirmation = true;
+      confCode = "PRICE_UNVERIFIABLE";
+      confReason = "Current price could not be verified, so the change can't be auto-approved.";
+    } else {
+      const absDelta = Math.abs(newPrice - current);
+      const pct = current > 0 ? absDelta / current : Infinity;
+      const autoOk = absDelta <= req.config.priceChangeAbsFloorCents || pct <= req.config.priceChangePctThreshold;
+      if (!autoOk) {
+        requiresConfirmation = true;
+        confCode = "OVER_PRICE_THRESHOLD";
+        const pctLabel = current > 0 ? `${Math.round(pct * 100)}%` : "∞";
+        confReason = `Price change of ${usd(absDelta)} (${pctLabel}) exceeds the auto-approve band (±${Math.round(req.config.priceChangePctThreshold * 100)}% or ${usd(req.config.priceChangeAbsFloorCents)}).`;
       }
     }
-    return { outcome: "ALLOWED" };
+  } else if (req.tool === "create_shift" || req.tool === "update_shift") {
+    if (req.tool === "update_shift" && !str(req.args, "shiftId")) return deny("INVALID_ARGUMENTS", "Missing or invalid shiftId.");
+    // Scheduling lockout: block edits too close to a shift's start (labor-law / no-show risk).
+    if (deps.getShiftStartMs && req.config.shiftEditLockoutMinutes > 0) {
+      const startMs = await deps.getShiftStartMs({ brandId: req.brandId, args: req.args });
+      if (startMs !== null) {
+        const minutesUntil = (startMs - now()) / 60000;
+        if (minutesUntil < req.config.shiftEditLockoutMinutes)
+          return deny(
+            "SCHEDULING_LOCKOUT",
+            `Shift starts in ${Math.round(minutesUntil)} min; edits within ${req.config.shiftEditLockoutMinutes} min of start are blocked.`,
+          );
+      }
+    }
+    // Otherwise MEDIUM: confirmation only if the brand-wide flag is set (already reflected above).
+  } else {
+    // HIGH: void_check / refund_payment. Judge the TRUE amount; never auto-execute.
+    const amount = await deps.resolveFinancialAmountCents({ brandId: req.brandId, tool: req.tool, args: req.args });
+    if (amount === null) return deny("FINANCIAL_AMOUNT_UNRESOLVED", "Could not resolve the amount for this financial action; refusing to proceed.");
+    if (!isPosInt(amount)) return deny("INVALID_ARGUMENTS", `Resolved financial amount (${usd(amount)}) is not a positive integer.`);
+    const cap = req.config.financialCapCentsByTool[req.tool];
+    if (amount > cap) return deny("OVER_FINANCIAL_CAP", `${usd(amount)} exceeds the ${usd(cap)} automated cap for ${req.tool}.`);
+    requiresConfirmation = true; // financial reversals ALWAYS need a human, even under the cap.
+    confCode = "FINANCIAL_ACTION_CONFIRM";
+    confReason = `Financial action (${usd(amount)}) requires human confirmation.`;
   }
 
-  // 6. HIGH (void_check / refund_payment): the deliberately conservative edge of "balanced".
-  //    Moving money is the one place we accept friction to avoid an irreversible mistake:
-  //    even when enabled and under the cap, a reversal ALWAYS needs a human; above the cap
-  //    it is denied outright.
-  //    Trade-off: this will frustrate agents that legitimately need to refund — that's the
-  //    intended cost. A looser posture could auto-approve small refunds; we never do.
-  const amount = num(args, "amountCents") ?? 0;
-  if (amount > config.financialActionThresholdCents) {
-    return {
-      outcome: "DENIED",
-      reason: `${usd(amount)} exceeds the ${usd(config.financialActionThresholdCents)} limit for automated financial actions.`,
-    };
+  // 7. Confirmation gate (non-bypassable by the agent; only a valid server-minted token passes).
+  if (requiresConfirmation) {
+    const c = await resolveConfirmation(req, deps, confCode, confReason);
+    if (c !== "PROCEED") return c;
   }
-  return { outcome: "NEEDS_CONFIRMATION", reason: `Financial action (${usd(amount)}) requires human confirmation.` };
+
+  // 8. Velocity — atomic reserve, only for a write we're otherwise about to allow.
+  if (!(await deps.reserveVelocitySlot({ brandId: req.brandId, tool: req.tool, limitPerMinute: req.config.maxWritesPerMinute })))
+    return deny("RATE_LIMITED", `Write rate limit reached (${req.config.maxWritesPerMinute}/min). Try again shortly.`);
+
+  return allow();
 }
