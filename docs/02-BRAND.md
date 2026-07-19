@@ -5,9 +5,6 @@
 **Use:** Hand this to any designer or AI image generator to produce consistent,
 professional brand materials.
 
-**Built on:** The Ideabrowser Brand Package template, filled in for Servvo
-(restaurant vertical).
-
 ---
 
 ## Brand at a glance
