@@ -1,7 +1,9 @@
 # Servvo — Implementation Guide
 
 **Scope:** v1 — restaurants, managed multi-tenant cloud, TypeScript/Node.
+
 **Audience:** The engineer(s) building Servvo (you + Claude Code).
+
 **Prereqs:** Familiarity with TypeScript, OAuth, and REST APIs. MCP knowledge helpful but this guide is self-contained.
 
 ---
