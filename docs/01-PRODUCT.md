@@ -79,8 +79,7 @@ autonomous agent. To connect even one to an AI layer, an operator faces:
 | **Risk** | Handing an agent write-access to live payments and payroll with no guardrails |
 
 The software that could pull a report or rebook a shift sits **one integration
-away, untouched.** This is a chronic, increasing, high-frequency pain (Ideabrowser
-Pain Score 8/10; willingness-to-pay 8/10).
+away, untouched.** This is a chronic, increasing, high-frequency pain
 
 ### Why existing tools don't solve it
 
@@ -122,8 +121,7 @@ the chain adopts now or later — it is deliberately not locked to one AI vendor
 
 ## 4. Why now
 
-Four forces converged in 2025–2026 to make this the right moment (Ideabrowser Why-Now
-score 9/10 — "Perfect Timing"):
+Four forces converged in 2025–2026 to make this the right moment:
 
 1. **The MCP standard matured into a real integration layer.** The Streamable HTTP
    transport (2025-06-18 spec) plus the OAuth 2.1 authorization spec (finalized
