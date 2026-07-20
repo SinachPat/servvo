@@ -210,33 +210,14 @@ function validateConfig(c: BrandGuardrailConfig): string | null {
   return null;
 }
 
-/** Resolve the confirmation gate: PROCEED if satisfied, else a Decision to return. */
-async function resolveConfirmation(
-  req: WriteActionRequest,
-  deps: PolicyDependencies,
-  code: DecisionCode,
-  reason: string,
-): Promise<Decision | "PROCEED"> {
-  const fp = computeActionFingerprint(req);
-  if (req.confirmationToken) {
-    if (!deps.consumeConfirmationToken) return deny("CONFIRMATION_UNAVAILABLE", "Confirmation is not supported by this deployment.");
-    const ok = await deps.consumeConfirmationToken({
-      brandId: req.brandId,
-      agentSub: req.agentSub,
-      tool: req.tool,
-      token: req.confirmationToken,
-      actionFingerprint: fp,
-    });
-    // A supplied-but-invalid token is treated as a hard failure (possible tampering/replay).
-    return ok ? "PROCEED" : deny("CONFIRMATION_INVALID", "Confirmation token is invalid, expired, or does not match this action.");
-  }
-  return confirm(code, reason, fp);
-}
-
 // ---------------------------------------------------------------------------------
 // evaluateWriteAction — the balanced policy, fail-closed and effect-aware.
 // Gate order: config → known tool → enabled → args → role → location → tier rules
-// (hard denials) → confirmation → atomic velocity → ALLOWED.
+// (hard denials) → confirmation request → atomic velocity → token consumption → ALLOWED.
+// The last three are deliberately in that order: an unapproved request returns its
+// fingerprint WITHOUT consuming write capacity, and a rate-limited call is rejected
+// BEFORE the confirmation token is consumed — so hitting the rate limit never burns
+// a human approval (the token stays valid for the retry).
 // ---------------------------------------------------------------------------------
 export async function evaluateWriteAction(req: WriteActionRequest, deps: PolicyDependencies): Promise<Decision> {
   const now = deps.now ?? Date.now;
@@ -331,15 +312,32 @@ export async function evaluateWriteAction(req: WriteActionRequest, deps: PolicyD
     confReason = `Financial action (${usd(amount)}) requires human confirmation.`;
   }
 
-  // 7. Confirmation gate (non-bypassable by the agent; only a valid server-minted token passes).
-  if (requiresConfirmation) {
-    const c = await resolveConfirmation(req, deps, confCode, confReason);
-    if (c !== "PROCEED") return c;
-  }
+  // 7. Confirmation gate, part 1: confirmation required and no token yet → return the
+  //    fingerprint now, BEFORE reserving a velocity slot, so requests waiting on a human
+  //    don't consume write capacity.
+  if (requiresConfirmation && !req.confirmationToken)
+    return confirm(confCode, confReason, computeActionFingerprint(req));
 
-  // 8. Velocity — atomic reserve, only for a write we're otherwise about to allow.
+  // 8. Velocity — atomic reserve, BEFORE consuming any confirmation token, so a
+  //    rate-limited call never burns a human approval (the token stays valid for retry).
   if (!(await deps.reserveVelocitySlot({ brandId: req.brandId, tool: req.tool, limitPerMinute: req.config.maxWritesPerMinute })))
     return deny("RATE_LIMITED", `Write rate limit reached (${req.config.maxWritesPerMinute}/min). Try again shortly.`);
+
+  // 9. Confirmation gate, part 2: validate & single-use-consume the server-minted token.
+  //    A supplied-but-invalid token is a hard failure (possible tampering/replay), and a
+  //    token never bypasses any gate above — it only satisfies the confirmation requirement.
+  if (requiresConfirmation && req.confirmationToken) {
+    if (!deps.consumeConfirmationToken)
+      return deny("CONFIRMATION_UNAVAILABLE", "Confirmation is not supported by this deployment.");
+    const ok = await deps.consumeConfirmationToken({
+      brandId: req.brandId,
+      agentSub: req.agentSub,
+      tool: req.tool,
+      token: req.confirmationToken,
+      actionFingerprint: computeActionFingerprint(req),
+    });
+    if (!ok) return deny("CONFIRMATION_INVALID", "Confirmation token is invalid, expired, or does not match this action.");
+  }
 
   return allow();
 }

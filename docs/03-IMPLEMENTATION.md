@@ -148,7 +148,7 @@ servvo/
 │  │  ├─ square/
 │  │  ├─ clover/
 │  │  └─ sevenshifts/
-│  ├─ policy/               # guardrail policy engine  ← your contribution
+│  ├─ policy/               # guardrail policy engine (balanced, fail-closed)
 │  ├─ audit/                # audit log writer + query
 │  ├─ secrets/              # token custody (encrypt/decrypt/refresh)
 │  └─ db/                   # Prisma schema + client
@@ -222,7 +222,8 @@ model AuditLog {           // immutable record of every agent action (see §10)
   tool       String
   args       Json
   locationId String?
-  outcome    Outcome                           // ALLOWED|DENIED|ERROR
+  outcome    Outcome                           // ALLOWED|DENIED|NEEDS_CONFIRMATION|ERROR
+  code       String?                           // machine-readable DecisionCode from the policy engine
   reason     String?
   result     Json?
   latencyMs  Int?
@@ -312,7 +313,9 @@ Every vendor implements one interface. This is the seam that makes the 40% reuse
 
 ```ts
 // packages/connectors/core/src/connector.ts
-import type { SalesSummary, MenuItem, LaborSummary, Shift, Location } from "@servvo/canonical";
+import type {
+  SalesSummary, MenuItem, LaborSummary, Shift, Location, Money, DateRange,
+} from "@servvo/canonical";
 
 export interface ConnectorContext {
   brandId: string;
@@ -394,7 +397,9 @@ export function buildServer(brandId: string) {
     {
       locationId: z.string(),
       itemId: z.string(),
-      available: z.boolean()
+      available: z.boolean(),
+      confirmationToken: z.string().optional()
+        .describe("One-time token from a prior human approval, if this action required one")
     },
     async (args, { authInfo }) => {
       // `policyDeps` wires the engine to trusted infra (current price, resolved
@@ -473,7 +478,7 @@ closed** when it can't:
 | Location | `isLiveBrandLocation()` — an empty allow-list still requires a real live location of *this* brand (never "any string"). |
 | Role | `getAgentRole()` vs. `minimumRoleByTool` — enforces the RBAC the product promises. |
 | Velocity | `reserveVelocitySlot()` — an **atomic** reserve (Redis), not a passed-in count, so there's no check-then-act race. |
-| Confirmation | A server-minted, one-time, expiring token bound to the action's `computeActionFingerprint()`. The agent **cannot** forge a boolean to self-approve; hard denials are never bypassable by a token. |
+| Confirmation | A server-minted, one-time, expiring token bound to the action's `computeActionFingerprint()`. The agent **cannot** forge a boolean to self-approve; hard denials are never bypassable by a token. Ordering matters: an unapproved request returns its fingerprint *without* consuming a velocity slot, and the rate limit is checked *before* the token is consumed — so a rate-limited retry never burns an approval. |
 | Config | `validateConfig()` rejects `NaN`/negative/zero values up front, so a bad config can't silently disable a gate. |
 
 Design decisions the posture encodes:
@@ -559,7 +564,7 @@ Design decisions the posture encodes:
 
 ### Phase 2 — Pilot-ready (weeks 6–18)
 7. **Toast adapter** (client-credentials + GUIDs; partner access) and **7shifts** (labor).
-8. `packages/policy` guardrail engine + write tools (`set_item_availability`, `update_item_price`) behind it.
+8. `packages/policy` guardrail engine + write tools (`set_item_availability`, `update_item_price`, `create_shift`, `update_shift`) behind it.
 9. Health monitoring, token refresh jobs, rate-limit buckets, caching.
 10. Onboarding polish → **<30-min setup**; connection-health UI; reconnect flow.
 11. **Clover adapter** if interviews demand it.
@@ -653,7 +658,9 @@ Servvo's **balanced** posture (`BALANCED_DEFAULT_CONFIG`), verified by
   velocity cap, malformed-config rejection, and a **non-bypassable confirmation token**.
 
 **Gate order** (each fails closed): config → known tool → enabled → args → role → location →
-tier rules → confirmation → atomic velocity → `ALLOWED`.
+tier rules → confirmation request → atomic velocity → token consumption → `ALLOWED`.
+The tail ordering is deliberate: unapproved requests don't consume write capacity, and a
+rate-limited call never burns a human approval.
 
 Wiring `deps` (`PolicyDependencies`) is the integration work in Prompt 11 — the engine only
 enforces what those trusted lookups tell it, and refuses to proceed when they can't answer.

@@ -160,6 +160,29 @@ describe("guardrails — confirmation protocol", () => {
     );
     expect(d).toMatchObject({ outcome: "DENIED", code: "OVER_FINANCIAL_CAP" });
   });
+
+  it("does not consume a velocity slot for an unapproved confirmation request", async () => {
+    let reserved = false;
+    const d = await evaluateWriteAction(
+      confReq,
+      deps({ reserveVelocitySlot: async () => ((reserved = true), true) }),
+    );
+    expect(d.outcome).toBe("NEEDS_CONFIRMATION");
+    expect(reserved).toBe(false);
+  });
+
+  it("does not burn a confirmation token when rate-limited", async () => {
+    let consumed = false;
+    const d = await evaluateWriteAction(
+      { ...confReq, confirmationToken: "good" },
+      deps({
+        reserveVelocitySlot: async () => false,
+        consumeConfirmationToken: async () => ((consumed = true), true),
+      }),
+    );
+    expect(d).toMatchObject({ outcome: "DENIED", code: "RATE_LIMITED" });
+    expect(consumed).toBe(false);
+  });
 });
 
 // ---- happy paths & fingerprint --------------------------------------------------

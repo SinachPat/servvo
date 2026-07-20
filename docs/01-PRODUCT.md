@@ -79,7 +79,8 @@ autonomous agent. To connect even one to an AI layer, an operator faces:
 | **Risk** | Handing an agent write-access to live payments and payroll with no guardrails |
 
 The software that could pull a report or rebook a shift sits **one integration
-away, untouched.** This is a chronic, increasing, high-frequency pain
+away, untouched.** This is a chronic, increasing, high-frequency pain with high
+willingness to pay.
 
 ### Why existing tools don't solve it
 
@@ -124,14 +125,13 @@ the chain adopts now or later — it is deliberately not locked to one AI vendor
 Four forces converged in 2025–2026 to make this the right moment:
 
 1. **The MCP standard matured into a real integration layer.** The Streamable HTTP
-   transport (2025-06-18 spec) plus the OAuth 2.1 authorization spec (finalized
-   Nov 2025) mean a *hosted, secure, agent-agnostic* server is now a well-defined,
-   buildable thing — not a research project. Servvo can be the trusted managed
+   transport (2025-06-18 spec) plus the OAuth 2.1 authorization spec (hardened in
+   the Nov 2025 revision) mean a *hosted, secure, agent-agnostic* server is now a
+   well-defined, buildable thing — not a research project. Servvo can be the trusted managed
    layer before the standard is common knowledge.
-2. **Explosive, low-competition demand.** "MCP server" search volume is enormous
-   and growing (Ideabrowser reports 246K volume with triple-digit-thousands %
-   growth), yet the space is almost entirely *developer* tooling. The
-   business-owner segment is wide open.
+2. **Explosive, low-competition demand.** "MCP server" search volume is in the
+   hundreds of thousands per month and climbing steeply, yet the space is almost
+   entirely *developer* tooling. The business-owner segment is wide open.
 3. **API-first SaaS is now the norm.** Toast (120K+ locations), Square, Clover, and
    7shifts all expose documented REST APIs with OAuth. The raw material for
    connectors exists; nobody has packaged it for non-technical operators.
@@ -151,7 +151,7 @@ Four forces converged in 2025–2026 to make this the right moment:
 | **Beachhead** | US multi-unit restaurants (franchisees + small chains, 3–50 units) |
 | **Main competitor (adjacent)** | Zapier (workflow automation, not agent-native) |
 | **Comparable companies** | Zapier, Workato, Segment, Aptible |
-| **Revenue potential** | $1M–$10M ARR (Ideabrowser $$$); seed profile |
+| **Revenue potential** | $1M–$10M ARR; seed profile |
 | **Opportunity type** | Market gap, low competition, first-mover window "just right" |
 
 ### Sizing logic (illustrative, bottom-up)
@@ -315,25 +315,28 @@ These are the **tools** and **resources** an agent sees. All map to the canonica
 schema; the operator's actual POS is invisible to the agent.
 
 ### Read tools (default-on)
-| Tool | What it returns |
-|------|-----------------|
-| `list_locations` | The brand's live locations + status |
-| `get_sales_summary` | Net sales, checks, covers, average check — by location + date range |
-| `get_menu` | Items, modifiers, prices, availability (incl. 86'd items) |
-| `get_labor_summary` | Hours, labor cost, labor % of sales — by location + period |
-| `get_shifts` | Scheduled/worked shifts by employee & location |
-| `get_inventory_levels` | Stock/quantity where the POS exposes it |
-| `get_reservations` | Covers / bookings by location + date (where connected) |
-| `search_orders` | Orders/checks by date, location, or GUID |
-| `compare_locations` | Any metric ranked across locations |
+| Tool | What it returns | Phase |
+|------|-----------------|-------|
+| `list_locations` | The brand's live locations + status | v1 |
+| `get_sales_summary` | Net sales, checks, covers, average check — by location + date range | v1 |
+| `get_menu` | Items, modifiers, prices, availability (incl. 86'd items) | v1 |
+| `get_labor_summary` | Hours, labor cost, labor % of sales — by location + period | v1 |
+| `get_shifts` | Scheduled/worked shifts by employee & location | v1 |
+| `compare_locations` | Any metric ranked across locations | v1 |
+| `search_orders` | Orders/checks by date, location, or id | v1.x (Toast/Square orders APIs) |
+| `get_inventory_levels` | Stock/quantity where the POS exposes it | v1.x (Square inventory; Toast stock) |
+| `get_reservations` | Covers / bookings by location + date | Post-v1 (needs OpenTable/Resy connectors) |
 
 ### Write tools (opt-in, guardrailed)
+Defaults below are the shipped **balanced posture** (see the guardrail engine in the
+implementation guide); every value is per-brand configurable.
+
 | Tool | Action | Default guardrail |
 |------|--------|-------------------|
-| `set_item_availability` | 86 / un-86 a menu item | Confirmation off, per-location allowed |
-| `update_item_price` | Change a price | Requires confirmation + threshold check |
-| `create_shift` / `update_shift` | Scheduling changes | Requires manager role |
-| `void_check` / `refund_payment` | Financial reversal | **Disabled by default** — must be explicitly enabled per brand |
+| `set_item_availability` | 86 / un-86 a menu item | Staff role+; no confirmation; every call audited |
+| `update_item_price` | Change a price | Manager role+; auto-approved only within ±15% (or ≤$0.50) of the **verified current price**; confirmation beyond |
+| `create_shift` / `update_shift` | Scheduling changes | Manager role+; blocked within 2h of shift start |
+| `void_check` / `refund_payment` | Financial reversal | **Disabled by default**; once enabled: hard-denied above $50, and **always** requires human confirmation — never auto-executes |
 
 ### Resources (readable context)
 - `brand://profile` — brand, locations, connected systems.
@@ -348,8 +351,8 @@ schema; the operator's actual POS is invisible to the agent.
 
 ## 11. Business model & pricing
 
-Servvo monetizes with a tiered SaaS ladder plus usage and enterprise setup — mirroring
-the Ideabrowser Value Ladder.
+Servvo monetizes with a tiered SaaS ladder plus usage and enterprise setup, structured
+as a classic value ladder.
 
 ### The value ladder
 

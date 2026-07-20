@@ -28,12 +28,31 @@ without anyone writing an integration.
 
 ## Documents in this repo
 
+### Core
+
 | # | Document | What it covers |
 |---|----------|----------------|
 | 1 | [Product Document](docs/01-PRODUCT.md) | Vision, problem, market, personas, full product spec, business model, pricing, GTM, risks, roadmap, metrics |
 | 2 | [Brand Package](docs/02-BRAND.md) | Name rationale, positioning, logo concepts, color system, typography, voice, taglines, visual guidelines, AI image prompts |
-| 3 | [Implementation Guide](docs/03-IMPLEMENTATION.md) | Architecture, dual-OAuth topology, canonical schema, connector framework, security & compliance, phased build plan, testing, deployment |
+| 3 | [Implementation Guide](docs/03-IMPLEMENTATION.md) | Architecture, dual-OAuth topology, canonical schema, connector framework, guardrails, security, phased build plan, testing, deployment |
 | 4 | [Claude Code Prompts](docs/04-CLAUDE-CODE-PROMPTS.md) | Copy-paste prompts to build Servvo phase-by-phase with Claude Code |
+
+### Execution
+
+| # | Document | What it covers |
+|---|----------|----------------|
+| 5 | [Discovery Interviews](docs/05-DISCOVERY-INTERVIEWS.md) | The 12-operator interview guide that decides the v1 connector set and validates pricing — with scoring rubric and go/no-go gates |
+| 6 | [Pilot Playbook](docs/06-PILOT-PLAYBOOK.md) | The 90-day pilot: offer terms, recruitment, the 30-minute onboarding runbook, weekly cadence, incident protocol, day-90 gate |
+| 7 | [GTM Playbook](docs/07-GTM-PLAYBOOK.md) | Consultant partner program, conference demo, content engine, outbound templates, battlecards, funnel targets |
+| 8 | [Landing Page](docs/08-LANDING-PAGE.md) | Final-draft copy + wireframe blocks for the marketing site, in brand voice, with SEO meta |
+| 9 | [Security & Trust](docs/09-SECURITY-TRUST.md) | Internal security posture + the public trust-page source: data handling, guardrails, compliance roadmap, incident response, sales FAQ |
+| 10 | [Vendor Partnerships](docs/10-VENDOR-PARTNERSHIPS.md) | Toast/Square/Clover/7shifts API access models, scopes, application packet, status tracker, risk register |
+
+### Working code & project memory
+
+- [`packages/policy/src/guardrails.ts`](packages/policy/src/guardrails.ts) — the write-action guardrail engine (balanced posture, fail-closed, effect-aware) + [its test suite](packages/policy/src/guardrails.test.ts)
+- [`CLAUDE.md`](CLAUDE.md) — project memory loaded by every Claude Code session
+- [`.claude/skills/`](.claude/skills) — project skills: `add-connector`, `mcp-tool-design`, `guardrail-policy`, `canonical-schema`, `servvo-brand`, `servvo-security-review`, `verify-agent-e2e`
 
 ---
 

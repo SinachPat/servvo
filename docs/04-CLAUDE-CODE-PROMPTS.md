@@ -19,9 +19,14 @@ between each.
 
 ## Prompt 0 — Seed project memory (CLAUDE.md)
 
+> A CLAUDE.md already exists at the repo root (created alongside these docs), and
+> project skills live in `.claude/skills/`. Use this prompt to *verify and extend* it
+> once code exists (fill in the Commands section), not to recreate it.
+
 ```
-Create a CLAUDE.md at the repo root that captures the project context so every future
-session shares it. Include:
+Review the existing CLAUDE.md at the repo root against docs/01–04 and extend it rather
+than recreating it. It must capture the following context so every future session
+shares it:
 
 PROJECT: Servvo — done-for-you MCP (Model Context Protocol) connectors for multi-location
 restaurants. We host a managed, multi-tenant remote MCP server. Operators connect their
@@ -85,8 +90,9 @@ implementation guide: Operator, Brand (the tenant + billing unit, with a plan en
 mcpClientId), Connection (vendor enum, status enum PENDING|HEALTHY|DEGRADED|EXPIRED, a
 secretRef pointer NOT the token, scopes), Location (live flag, vendorRefs JSON mapping
 Servvo location → vendor-specific ids), Policy (rules JSON), and AuditLog (append-only:
-brandId, agentSub, tool, args, locationId, outcome ALLOWED|DENIED|ERROR, reason, result,
-latencyMs, createdAt). Add appropriate indexes (esp. AuditLog by brandId+createdAt, and
+brandId, agentSub, tool, args, locationId, outcome ALLOWED|DENIED|NEEDS_CONFIRMATION|ERROR,
+code — the policy engine's machine-readable DecisionCode — reason, result, latencyMs,
+createdAt). Add appropriate indexes (esp. AuditLog by brandId+createdAt, and
 Connection by brandId+vendor). Export a typed Prisma client from the package. Generate an
 initial migration. Write a seed script that creates one demo operator + brand + two
 locations so later phases have data to hit. Include a brief note on adding Postgres
@@ -139,10 +145,11 @@ assertions (fixture -> expected canonical values). Use Square's sandbox, never l
 
 ```
 In packages/audit, implement an append-only audit writer and query API over the AuditLog
-Prisma model. Provide audit({ brandId, agentSub, tool, args, locationId?, outcome, reason?,
-result?, latencyMs? }) that writes one row, redacting obvious secrets from args/result before
+Prisma model. Provide audit({ brandId, agentSub, tool, args, locationId?, outcome, code?,
+reason?, result?, latencyMs? }) that writes one row — `code` is the policy engine's
+machine-readable DecisionCode — redacting obvious secrets from args/result before
 persistence. Provide a query function for the dashboard (filter by brand, date range, tool,
-outcome; paginated). Add an OPTIONAL hash-chain mode (each row stores a hash of prev-hash +
+outcome, code; paginated). Add an OPTIONAL hash-chain mode (each row stores a hash of prev-hash +
 this row) behind a flag, for tamper-evidence on enterprise brands, with a verify() function.
 Unit-test the writer, the redaction, and the hash-chain verification.
 ```
