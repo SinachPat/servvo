@@ -1,0 +1,32 @@
+# Local dev dependencies. Vendor sandboxes only — never point these at production.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: servvo-postgres
+    environment:
+      POSTGRES_USER: servvo
+      POSTGRES_PASSWORD: servvo
+      POSTGRES_DB: servvo
+    ports:
+      - "5432:5432"
+    volumes:
+      - servvo-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U servvo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: servvo-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  servvo-pg:

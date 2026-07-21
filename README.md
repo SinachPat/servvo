@@ -50,9 +50,44 @@ without anyone writing an integration.
 
 ### Working code & project memory
 
-- [`packages/policy/src/guardrails.ts`](packages/policy/src/guardrails.ts) — the write-action guardrail engine (balanced posture, fail-closed, effect-aware) + [its test suite](packages/policy/src/guardrails.test.ts)
 - [`CLAUDE.md`](CLAUDE.md) — project memory loaded by every Claude Code session
-- [`.claude/skills/`](.claude/skills) — project skills: `add-connector`, `mcp-tool-design`, `guardrail-policy`, `canonical-schema`, `servvo-brand`, `servvo-security-review`, `verify-agent-e2e`
+- [`.claude/skills/`](.claude/skills) — project skills: `servvo-ui-design`, `add-connector`, `mcp-tool-design`, `guardrail-policy`, `canonical-schema`, `servvo-brand`, `servvo-security-review`, `verify-agent-e2e`
+- [`.agents/skills/`](.agents/skills) — 24 general engineering skills (TDD, spec-driven, debugging, security, a11y…)
+
+---
+
+## Quick start
+
+```bash
+pnpm install
+docker compose up -d          # postgres :5432 + redis :6379
+cp .env.example .env          # fill in — sandbox credentials only
+pnpm db:generate && pnpm db:migrate && pnpm db:seed
+
+pnpm typecheck && pnpm test   # 15 tasks, 50 tests
+pnpm --filter @servvo/dashboard dev   # :3000
+```
+
+## Monorepo
+
+```
+apps/
+  dashboard/       Next.js operator UI (Astryx design system, theme wired)
+  mcp-server/      remote MCP endpoint — OAuth 2.1 resource server (fails closed)
+  control-plane/   vendor OAuth, token refresh, health, approval endpoint
+packages/
+  canonical/       the canonical restaurant schema — THE boundary (money = int cents)
+  policy/          guardrail engine: async, fail-closed, effect-aware (20 tests)
+  connectors/core/ RestaurantConnector contract, HTTP client w/ retries, registry
+  audit/           append-only audit log + secret redaction
+  secrets/         envelope encryption for vendor tokens (KMS-wrapped)
+  db/              Prisma schema, client, brandScope() tenancy helper, demo seed
+```
+
+**Status:** foundation is green — `pnpm typecheck` and `pnpm test` pass (50 tests), the
+dashboard boots with the Astryx theme applied, and the guardrail engine is production-shaped.
+The vendor adapters, MCP tool surface, and dashboard screens are built next via
+[the Claude Code prompts](docs/04-CLAUDE-CODE-PROMPTS.md) (start at Prompt 4).
 
 ---
 

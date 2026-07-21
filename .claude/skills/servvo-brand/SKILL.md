@@ -12,16 +12,23 @@ subset — apply it without re-deriving.
 
 | Token | Hex | Use |
 |-------|-----|-----|
-| `ember` | `#FF5A1F` | THE accent: primary CTA, logo, live/active states. One per screen/section. |
+| `ember` | `#FF5A1F` | THE accent: primary CTA fill, logo, live/active states. One per screen/section. **Fill only — never text.** |
 | `ember-deep` | `#D8430E` | Ember hover/pressed only |
-| `ink` | `#141A22` | Primary text, dark chrome |
+| `ink` | `#141A22` | Primary text, dark chrome, **and labels on Ember fills** |
 | `paper` | `#FBFAF8` | Light backgrounds (warm white, not pure #FFF) |
 | `slate-500` | `#5B6672` | Secondary text, borders, muted |
-| `green` | `#1FB877` | Connected/healthy/success only |
-| `amber` | `#F5A524` | Attention/degraded/confirmation-pending only |
+| `green` | `#1FB877` | Connected/healthy — **dot/fill only, never text** |
+| `amber` | `#F5A524` | Attention/degraded — **dot/fill only, never text** |
 
 Ratio ≈ 70% neutrals / 20% status / 10% Ember. If a screen has two Ember elements,
 one is wrong. Status colors are semantic — never decorative.
+
+**Contrast constraints (measured, binding):** white-on-Ember is **3.12 → fails AA**;
+Ink-on-Ember is **5.61 → passes**. So Ember buttons carry *Ink* labels, not white.
+Ember-on-Paper is 2.99 and green/amber are ~2:1, so none of them may carry text or be
+the sole carrier of meaning — pair every status dot with an Ink label. Full table in
+[docs/02-BRAND.md](../../../docs/02-BRAND.md#accessibility-constraints-on-the-palette-measured-binding)
+and [servvo-ui-design](../servvo-ui-design/SKILL.md).
 
 ## Type
 

@@ -128,6 +128,34 @@ professional brand materials.
 > **Ratio guide:** ~70% neutrals (Paper White / Slate Ink / Slate 500), ~20% supporting
 > (green/amber where meaningful), ~10% Ember. Ember earns attention by being rare.
 
+### Accessibility constraints on the palette (measured, binding)
+
+These ratios are computed, not estimated. They constrain how the palette may be used:
+
+| Pair | Ratio | Verdict |
+|------|-------|---------|
+| Slate Ink on Paper White | 16.77 | ✅ anything |
+| Slate 500 on Paper White | 5.61 | ✅ body — the secondary-text workhorse |
+| **Slate Ink on Ember** | **5.61** | ✅ **the correct label color on Ember fills** |
+| Deep Ember on Paper White | 4.26 | ⚠️ large/bold text or UI boundaries only |
+| **White on Ember** | **3.12** | ❌ **fails AA at normal text size** |
+| Ember on Paper White | 2.99 | ❌ fails body and the 3:1 UI threshold |
+| Signal Green on Paper White | 2.46 | ❌ dot/fill only, never text |
+| Amber Caution on Paper White | 1.96 | ❌ dot/fill only, never text |
+
+**Consequences (not negotiable):**
+- **Ember is a fill color.** Never Ember text on Paper White; never Ember as a lone
+  meaning-carrying border.
+- **Ember buttons take Slate Ink labels, not white.** The instinctive white-on-orange
+  primary button fails AA — Ink on Ember passes comfortably. This is why Servvo's
+  primary CTA reads as ink-on-ember rather than the usual white-on-brand.
+- **Green and amber are dots and fills only.** Status meaning always lives in an
+  adjacent Ink label ("Connected", "Reconnect needed") — color alone is both an a11y
+  failure and a contrast failure here.
+
+Implementation lives in the Astryx theme, not in components — see
+[`.claude/skills/servvo-ui-design/SKILL.md`](../.claude/skills/servvo-ui-design/SKILL.md).
+
 ---
 
 ## 3. Typography system

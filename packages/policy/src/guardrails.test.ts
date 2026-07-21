@@ -7,7 +7,7 @@ import {
   type PolicyDependencies,
   type Role,
   type WriteActionRequest,
-} from "./guardrails";
+} from "./guardrails.js";
 
 // ---- fixtures -------------------------------------------------------------------
 

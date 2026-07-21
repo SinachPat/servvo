@@ -1,0 +1,177 @@
+// Servvo data model.
+//
+// Tenancy invariant: Brand is the tenant and the isolation boundary. EVERY query is
+// brand-scoped. Postgres RLS is applied on top as defense-in-depth (see migrations).
+// Vendor tokens NEVER live here in plaintext — Connection.secretRef points into the
+// KMS-encrypted secrets store.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Plan {
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+enum Vendor {
+  TOAST
+  SQUARE
+  CLOVER
+  SEVENSHIFTS
+}
+
+enum ConnStatus {
+  PENDING
+  HEALTHY
+  DEGRADED
+  EXPIRED
+}
+
+enum Outcome {
+  ALLOWED
+  DENIED
+  NEEDS_CONFIRMATION
+  ERROR
+}
+
+enum Role {
+  READ_ONLY
+  STAFF
+  MANAGER
+  OWNER
+}
+
+model Operator {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  brands    Brand[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Brand {
+  id          String       @id @default(cuid())
+  operatorId  String
+  operator    Operator     @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  name        String
+  plan        Plan         @default(BASIC)
+  /// Agent-leg OAuth client id — the brand claim in an agent token maps here.
+  mcpClientId String       @unique @default(cuid())
+  connections Connection[]
+  locations   Location[]
+  policy      Policy?
+  auditLogs   AuditLog[]
+  agentGrants AgentGrant[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([operatorId])
+}
+
+model Connection {
+  id         String     @id @default(cuid())
+  brandId    String
+  brand      Brand      @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  vendor     Vendor
+  status     ConnStatus @default(PENDING)
+  /// Pointer into the encrypted secrets store. NEVER a token.
+  secretRef  String
+  scopes     String[]
+  lastSyncAt DateTime?
+  lastError  String?
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@unique([brandId, vendor])
+  @@index([brandId, status])
+}
+
+model Location {
+  id         String   @id @default(cuid())
+  brandId    String
+  brand      Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  name       String
+  timezone   String   @default("America/New_York")
+  /// Did the operator switch this store on? Writes require a LIVE location.
+  live       Boolean  @default(false)
+  /// Vendor-specific ids, e.g. { "TOAST": "<guid>", "SQUARE": "<location_id>" }
+  vendorRefs Json     @default("{}")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([brandId, live])
+}
+
+/// Maps an agent token subject to a role for a brand. Drives the guardrail RBAC gate.
+model AgentGrant {
+  id        String   @id @default(cuid())
+  brandId   String
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  agentSub  String
+  role      Role     @default(READ_ONLY)
+  label     String?
+  createdAt DateTime @default(now())
+
+  @@unique([brandId, agentSub])
+  @@index([brandId])
+}
+
+/// Serialized BrandGuardrailConfig from @servvo/policy.
+model Policy {
+  id        String   @id @default(cuid())
+  brandId   String   @unique
+  brand     Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  rules     Json
+  updatedAt DateTime @updatedAt
+}
+
+/// One-time, expiring, fingerprint-bound human approval for a guardrailed write.
+/// Single-use is enforced by consumedAt; the agent can never mint one of these.
+model ConfirmationToken {
+  id                String    @id @default(cuid())
+  brandId           String
+  agentSub          String
+  tool              String
+  actionFingerprint String
+  tokenHash         String    @unique
+  approvedBy        String
+  expiresAt         DateTime
+  consumedAt        DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([brandId, actionFingerprint])
+  @@index([expiresAt])
+}
+
+/// Append-only. Every agent tool call lands here — allowed, denied, or errored.
+model AuditLog {
+  id         String   @id @default(cuid())
+  brandId    String
+  brand      Brand    @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  agentSub   String
+  tool       String
+  args       Json
+  locationId String?
+  outcome    Outcome
+  /// Machine-readable DecisionCode from the policy engine (e.g. OVER_FINANCIAL_CAP).
+  code       String?
+  reason     String?
+  result     Json?
+  latencyMs  Int?
+  /// Optional tamper-evidence chain (enterprise tier).
+  prevHash   String?
+  hash       String?
+  createdAt  DateTime @default(now())
+
+  @@index([brandId, createdAt])
+  @@index([brandId, tool, createdAt])
+  @@index([brandId, outcome])
+}

@@ -1,0 +1,37 @@
+{
+  "name": "servvo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Done-for-you MCP connectors for multi-location restaurants",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "lint": "eslint .",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json,yaml}\"",
+    "db:generate": "pnpm --filter @servvo/db generate",
+    "db:migrate": "pnpm --filter @servvo/db migrate",
+    "db:seed": "pnpm --filter @servvo/db seed",
+    "design": "astryx"
+  },
+  "dependencies": {
+    "@astryxdesign/cli": "^0.1.7",
+    "@astryxdesign/core": "^0.1.7",
+    "@astryxdesign/theme-neutral": "^0.1.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.2",
+    "eslint": "^10.7.0",
+    "prettier": "^3.4.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^2.1.8"
+  }
+}

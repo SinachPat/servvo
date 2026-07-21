@@ -71,13 +71,21 @@ is table-driven.
 
 ```
 Scaffold the Servvo monorepo per CLAUDE.md using pnpm workspaces + Turborepo, TypeScript
-strict mode everywhere, ESLint + Prettier, and Vitest for tests. Create the workspace
-structure: apps/{dashboard,mcp-server,control-plane} and packages/{canonical,connectors,
-policy,audit,secrets,db}, with connectors containing subpackages core/toast/square/clover/
-sevenshifts. Add a root tsconfig with path aliases (@servvo/*). Set up a shared tsconfig
-base, a Turborepo pipeline (build, lint, test, typecheck), and placeholder index files so
-the workspace compiles. Don't implement business logic yet — just a clean, compiling
-skeleton with README stubs in each package explaining its role. Show me the resulting tree.
+strict mode everywhere, ESLint (flat config) + Prettier, and Vitest for tests. Create the
+workspace structure: apps/{dashboard,mcp-server,control-plane} and packages/{canonical,
+connectors,policy,audit,secrets,db}, with connectors containing subpackages
+core/toast/square/clover/sevenshifts.
+
+Rely on the pnpm workspace protocol for @servvo/* resolution — each package sets
+"main"/"types" to ./src/index.ts and depends on siblings with "workspace:*". Do NOT add
+tsconfig path aliases on top: they would be a redundant second resolution mechanism that
+drifts from package.json.
+
+Set up a shared tsconfig base, a Turborepo pipeline (build, test, typecheck; lint runs
+once at the root against the flat config), and placeholder index files so the workspace
+compiles. Don't implement business logic yet — just a clean, compiling skeleton with a
+README in each package explaining its role and the invariants that bind it. Show me the
+resulting tree.
 ```
 
 ---
@@ -106,11 +114,19 @@ Row-Level Security by brandId as defense-in-depth.
 ```
 In packages/canonical, implement the canonical restaurant domain types as zod schemas with
 inferred TS types: Money (integer minor units + ISO4217 currency — enforce no floats),
-Location, SalesSummary (netSales, grossSales, checkCount, coverCount nullable, averageCheck,
-plus `source` vendor and `method` string that documents how the figure was computed),
+Location, SalesSummary (netSales, grossSales, checkCount, coverCount nullable, averageCheck),
 MenuItem (with available:boolean where false === 86'd, and optional modifiers), LaborSummary
-(totalHours, laborCost, laborPctOfSales nullable), and Shift. Add a DateRange type. Export
-everything. Write a short README documenting the normalization contract: every adapter MUST
+(totalHours, laborCost, laborPctOfSales nullable), and Shift. Add a DateRange type.
+
+Define provenance ONCE as a reusable `Provenance` object ({ source: Vendor, method: string }
+where `method` documents exactly how the figure was computed, and an empty method fails
+validation), then attach `provenance` to every type carrying a computed metric —
+SalesSummary, MenuItem, LaborSummary, and Shift. Do not repeat flat source/method pairs on
+each type; four copies drift.
+
+Also add a `PartialResult<T>` type ({ results, unavailable[] }) so a tool can report "8 of
+12 locations; Square is unavailable" instead of failing an entire request when one vendor
+is down. Export everything. Write a short README documenting the normalization contract: every adapter MUST
 set source/method and document exactly how it maps each field, because vendors compute
 metrics differently. Add unit tests asserting the schemas reject floats-as-money and accept
 valid fixtures.
